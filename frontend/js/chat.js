@@ -68,6 +68,19 @@ const Chat = {
             });
         }
 
+        // File upload
+        this.fileInput = document.getElementById('file-input');
+        document.getElementById('upload-btn').addEventListener('click', () => {
+            if (!this.isStreaming) this.fileInput.click();
+        });
+        this.fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                this.uploadContract(file);
+                this.fileInput.value = ''; // Reset for re-upload
+            }
+        });
+
         this.loadConversations();
     },
 
@@ -386,6 +399,154 @@ const Chat = {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    },
+
+    /**
+     * Upload and analyze a contract file.
+     */
+    async uploadContract(file) {
+        if (this.isStreaming) return;
+
+        // Validate file size
+        const maxSize = 20 * 1024 * 1024;
+        if (file.size > maxSize) {
+            Toast.error('File quá lớn. Giới hạn 20MB.');
+            return;
+        }
+
+        this.isStreaming = true;
+        this.sendBtn.disabled = true;
+
+        // Show messages area
+        this.welcomeScreen.classList.add('hidden');
+        this.messagesArea.classList.remove('hidden');
+
+        // Format file size
+        const sizeStr = file.size < 1024 * 1024
+            ? (file.size / 1024).toFixed(1) + ' KB'
+            : (file.size / (1024 * 1024)).toFixed(1) + ' MB';
+
+        const fileExt = file.name.split('.').pop().toLowerCase();
+        const fileIcons = { pdf: '📄', docx: '📝', doc: '📝', png: '🖼️', jpg: '🖼️', jpeg: '🖼️' };
+        const fileIcon = fileIcons[fileExt] || '📎';
+
+        // Render file upload message
+        const user = API.getUser();
+        const userAvatar = user?.username?.[0]?.toUpperCase() || 'U';
+        this.messagesContainer.innerHTML += `
+            <div class="message user">
+                <div class="message-avatar">${userAvatar}</div>
+                <div class="message-body">
+                    <div class="file-info-banner">
+                        <span class="file-icon">${fileIcon}</span>
+                        <span class="file-name">${this.escapeHtml(file.name)}</span>
+                        <span class="file-size">${sizeStr}</span>
+                    </div>
+                    <div class="message-content">Phân tích hợp đồng lao động này</div>
+                </div>
+            </div>
+        `;
+
+        // Render assistant placeholder
+        const assistantMsgId = 'analysis-' + Date.now();
+        this.messagesContainer.innerHTML += `
+            <div class="message assistant" id="${assistantMsgId}">
+                <div class="message-avatar">⚖️</div>
+                <div class="message-body">
+                    <div class="message-content">
+                        <div class="typing-indicator">
+                            <span></span><span></span><span></span>
+                        </div>
+                    </div>
+                    <div class="message-sources"></div>
+                </div>
+            </div>
+        `;
+        this.scrollToBottom();
+
+        Toast.show('Đang xử lý file...', 'warning', 3000);
+
+        const { promise, abort } = API.uploadContract(file);
+        this.currentStreamController = { abort };
+
+        try {
+            const response = await promise;
+
+            if (response.status === 429) {
+                Toast.warning('Bạn đang gửi quá nhanh. Vui lòng chờ.');
+                return;
+            }
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.detail || 'Upload thất bại');
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let fullText = '';
+            const msgEl = document.getElementById(assistantMsgId);
+            const contentEl = msgEl.querySelector('.message-content');
+            const sourcesEl = msgEl.querySelector('.message-sources');
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const jsonStr = line.slice(6).trim();
+                    if (!jsonStr) continue;
+
+                    try {
+                        const data = JSON.parse(jsonStr);
+
+                        if (data.type === 'meta') {
+                            this.currentConversationId = data.conversation_id;
+                        } else if (data.type === 'extracted_text') {
+                            // Show extracted text preview
+                            contentEl.innerHTML = `
+                                <p style="color: var(--text-accent); font-weight: 500; margin-bottom: 8px;">📋 Đã trích xuất ${data.total_chars.toLocaleString()} ký tự. Đang phân tích...</p>
+                                <div class="extracted-text-preview">${this.escapeHtml(data.preview)}...</div>
+                                <div class="typing-indicator"><span></span><span></span><span></span></div>
+                            `;
+                            this.scrollToBottom();
+                        } else if (data.type === 'chunk') {
+                            fullText += data.content;
+                            contentEl.innerHTML = this.renderMarkdown(fullText);
+                            this.scrollToBottom();
+                        } else if (data.type === 'sources') {
+                            sourcesEl.innerHTML = this.renderSources(data.sources);
+                        } else if (data.type === 'error') {
+                            contentEl.innerHTML = `<span style="color: var(--error);">❌ ${this.escapeHtml(data.message)}</span>`;
+                            Toast.error(data.message);
+                        }
+                    } catch (e) { /* skip */ }
+                }
+            }
+
+            this.loadConversations();
+            Toast.success('Phân tích hoàn tất!');
+
+        } catch (err) {
+            if (err.name !== 'AbortError') {
+                const msgEl = document.getElementById(assistantMsgId);
+                if (msgEl) {
+                    msgEl.querySelector('.message-content').innerHTML =
+                        `<span style="color: var(--error);">❌ ${this.escapeHtml(err.message)}</span>`;
+                }
+                Toast.error(err.message);
+            }
+        } finally {
+            this.isStreaming = false;
+            this.sendBtn.disabled = !this.messageInput.value.trim();
+            this.currentStreamController = null;
+        }
     },
 
     /**

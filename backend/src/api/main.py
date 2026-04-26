@@ -12,6 +12,7 @@ from src.core.database import init_db
 from src.core.logging import setup_logging, get_logger
 from src.api.auth import router as auth_router
 from src.api.chat import router as chat_router
+from src.api.contract import router as contract_router
 
 settings = get_settings()
 
@@ -44,6 +45,7 @@ app.add_middleware(
 # Register routers
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(contract_router)
 
 
 @app.on_event("startup")

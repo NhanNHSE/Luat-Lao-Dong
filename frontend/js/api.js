@@ -152,4 +152,30 @@ const API = {
             abort: () => controller.abort(),
         };
     },
+
+    /**
+     * Upload a contract file for analysis with SSE streaming.
+     * Returns an object to control the stream.
+     */
+    uploadContract(file) {
+        const token = this.getToken();
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const controller = new AbortController();
+
+        const promise = fetch(`${this.BASE_URL}/contract/analyze`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+            },
+            body: formData,
+            signal: controller.signal,
+        });
+
+        return {
+            promise,
+            abort: () => controller.abort(),
+        };
+    },
 };
