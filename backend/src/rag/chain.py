@@ -127,3 +127,39 @@ def ask(question: str, messages: list = None, stream: bool = True):
         return generate_response_stream(question, documents, messages), documents
     else:
         return generate_response(question, documents, messages), documents
+
+
+def generate_title(question: str, answer: str) -> str:
+    """Generate a concise conversation title using LLM.
+
+    Args:
+        question: The user's first question.
+        answer: The assistant's first answer.
+
+    Returns:
+        A short title string (max 60 chars).
+    """
+    client = _get_client()
+    prompt = f"""Tạo một tiêu đề ngắn gọn (tối đa 50 ký tự) cho cuộc hội thoại pháp luật sau.
+Chỉ trả về tiêu đề, không giải thích.
+
+Câu hỏi: {question[:200]}
+Trả lời: {answer[:200]}
+
+Tiêu đề:"""
+
+    response = client.models.generate_content(
+        model=settings.llm_model,
+        contents=prompt,
+        config=GenerateContentConfig(
+            temperature=0.5,
+            max_output_tokens=60,
+        ),
+    )
+
+    title = response.text.strip().strip('"').strip("'")
+    # Ensure max length
+    if len(title) > 60:
+        title = title[:57] + "..."
+    return title
+

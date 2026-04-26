@@ -12,6 +12,8 @@ const App = {
         } else {
             this.showAuth();
         }
+        // Initialize toast notifications
+        Toast.init();
 
         // Initialize auth module
         Auth.init();

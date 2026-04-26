@@ -96,10 +96,11 @@ const API = {
     },
 
     /**
-     * Get all conversations.
+     * Get all conversations (with optional search).
      */
-    async getConversations() {
-        const res = await this.request('/chat/conversations');
+    async getConversations(search = '') {
+        const params = search ? `?search=${encodeURIComponent(search)}` : '';
+        const res = await this.request(`/chat/conversations${params}`);
         if (!res.ok) throw new Error('Không thể tải danh sách hội thoại');
         return res.json();
     },

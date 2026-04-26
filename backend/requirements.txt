@@ -23,6 +23,15 @@ qdrant-client==1.12.1
 datasets==3.0.1
 pandas==2.2.3
 
+# Rate Limiting
+slowapi==0.1.9
+
+# Caching
+cachetools==5.5.0
+
+# Logging
+structlog==24.4.0
+
 # Utilities
 python-dotenv==1.0.1
 pydantic==2.9.2

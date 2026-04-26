@@ -1,10 +1,12 @@
 /**
  * Chat module: messaging, streaming, conversation management.
+ * Uses marked.js for proper Markdown rendering.
  */
 const Chat = {
     currentConversationId: null,
     isStreaming: false,
     currentStreamController: null,
+    searchTimeout: null,
 
     init() {
         this.messagesContainer = document.getElementById('messages-container');
@@ -13,6 +15,17 @@ const Chat = {
         this.messageInput = document.getElementById('message-input');
         this.sendBtn = document.getElementById('send-btn');
         this.conversationsList = document.getElementById('conversations-list');
+        this.searchInput = document.getElementById('search-conversations');
+
+        // Configure marked.js
+        if (typeof marked !== 'undefined') {
+            marked.setOptions({
+                breaks: true,
+                gfm: true,
+                headerIds: false,
+                mangle: false,
+            });
+        }
 
         // Send message
         this.sendBtn.addEventListener('click', () => this.sendMessage());
@@ -45,15 +58,25 @@ const Chat = {
             });
         });
 
+        // Search conversations with debounce
+        if (this.searchInput) {
+            this.searchInput.addEventListener('input', () => {
+                clearTimeout(this.searchTimeout);
+                this.searchTimeout = setTimeout(() => {
+                    this.loadConversations(this.searchInput.value.trim());
+                }, 300);
+            });
+        }
+
         this.loadConversations();
     },
 
     /**
-     * Load conversation list in sidebar.
+     * Load conversation list in sidebar (with optional search).
      */
-    async loadConversations() {
+    async loadConversations(searchTerm = '') {
         try {
-            const conversations = await API.getConversations();
+            const conversations = await API.getConversations(searchTerm);
             this.renderConversationsList(conversations);
         } catch (err) {
             console.error('Failed to load conversations:', err);
@@ -62,9 +85,12 @@ const Chat = {
 
     renderConversationsList(conversations) {
         if (!conversations.length) {
+            const msg = this.searchInput?.value?.trim()
+                ? 'Không tìm thấy hội thoại phù hợp'
+                : 'Chưa có cuộc trò chuyện nào';
             this.conversationsList.innerHTML = `
                 <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.85rem;">
-                    Chưa có cuộc trò chuyện nào
+                    ${msg}
                 </div>
             `;
             return;
@@ -104,7 +130,7 @@ const Chat = {
             const conv = await API.getConversation(id);
             this.renderMessages(conv.messages);
         } catch (err) {
-            console.error('Failed to load conversation:', err);
+            Toast.error('Không thể tải hội thoại');
         }
 
         // Close sidebar on mobile
@@ -142,8 +168,9 @@ const Chat = {
                 this.newConversation();
             }
             this.loadConversations();
+            Toast.success('Đã xóa cuộc trò chuyện');
         } catch (err) {
-            console.error('Failed to delete conversation:', err);
+            Toast.error('Không thể xóa cuộc trò chuyện');
         }
     },
 
@@ -223,6 +250,17 @@ const Chat = {
 
         try {
             const response = await promise;
+
+            if (response.status === 429) {
+                Toast.warning('Bạn đang gửi quá nhanh. Vui lòng chờ một chút.');
+                const msgEl = document.getElementById(assistantMsgId);
+                if (msgEl) {
+                    msgEl.querySelector('.message-content').innerHTML =
+                        `<span style="color: var(--warning);">⚠️ Giới hạn tốc độ. Vui lòng thử lại sau.</span>`;
+                }
+                return;
+            }
+
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let fullText = '';
@@ -256,8 +294,12 @@ const Chat = {
                             this.scrollToBottom();
                         } else if (data.type === 'sources') {
                             sourcesEl.innerHTML = this.renderSources(data.sources);
+                        } else if (data.type === 'title_update') {
+                            // Update conversation title in sidebar
+                            this.updateConversationTitle(this.currentConversationId, data.title);
                         } else if (data.type === 'error') {
                             contentEl.innerHTML = `<span style="color: var(--error);">❌ Lỗi: ${this.escapeHtml(data.message)}</span>`;
+                            Toast.error(data.message);
                         }
                     } catch (e) {
                         // Skip invalid JSON
@@ -275,11 +317,23 @@ const Chat = {
                     msgEl.querySelector('.message-content').innerHTML =
                         `<span style="color: var(--error);">❌ Không thể kết nối đến server. Vui lòng thử lại.</span>`;
                 }
+                Toast.error('Không thể kết nối đến server');
             }
         } finally {
             this.isStreaming = false;
             this.sendBtn.disabled = !this.messageInput.value.trim();
             this.currentStreamController = null;
+        }
+    },
+
+    /**
+     * Update a conversation title in the sidebar without full reload.
+     */
+    updateConversationTitle(convId, newTitle) {
+        const item = document.querySelector(`.conversation-item[data-id="${convId}"]`);
+        if (item) {
+            const titleEl = item.querySelector('.conv-title');
+            if (titleEl) titleEl.textContent = newTitle;
         }
     },
 
@@ -300,37 +354,28 @@ const Chat = {
     },
 
     /**
-     * Simple markdown renderer.
+     * Render markdown using marked.js (with fallback).
      */
     renderMarkdown(text) {
         if (!text) return '';
-        let html = this.escapeHtml(text);
 
-        // Bold
+        // Use marked.js if available
+        if (typeof marked !== 'undefined') {
+            try {
+                return marked.parse(text);
+            } catch (e) {
+                console.warn('marked.js error, using fallback:', e);
+            }
+        }
+
+        // Fallback: simple markdown
+        let html = this.escapeHtml(text);
         html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        // Italic
         html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
-        // Headers
         html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
         html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
         html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
-        // Blockquote
-        html = html.replace(/^&gt; (.*$)/gm, '<blockquote>$1</blockquote>');
-        // Unordered list
-        html = html.replace(/^- (.*$)/gm, '<li>$1</li>');
-        html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
-        // Ordered list
-        html = html.replace(/^\d+\. (.*$)/gm, '<li>$1</li>');
-        // Inline code
-        html = html.replace(/`(.*?)`/g, '<code>$1</code>');
-        // Line breaks
         html = html.replace(/\n/g, '<br>');
-        // Clean up extra br in lists
-        html = html.replace(/<\/li><br>/g, '</li>');
-        html = html.replace(/<\/ul><br>/g, '</ul>');
-        html = html.replace(/<\/h[123]><br>/g, (m) => m.replace('<br>', ''));
-        html = html.replace(/<\/blockquote><br>/g, '</blockquote>');
-
         return html;
     },
 
