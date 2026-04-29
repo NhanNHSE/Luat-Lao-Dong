@@ -14,16 +14,23 @@ const Chat = {
         this.welcomeScreen = document.getElementById('welcome-screen');
         this.messageInput = document.getElementById('message-input');
         this.sendBtn = document.getElementById('send-btn');
+        this.stopBtn = document.getElementById('stop-btn');
         this.conversationsList = document.getElementById('conversations-list');
         this.searchInput = document.getElementById('search-conversations');
 
-        // Configure marked.js
+        // Configure marked.js with highlight.js
         if (typeof marked !== 'undefined') {
             marked.setOptions({
                 breaks: true,
                 gfm: true,
                 headerIds: false,
                 mangle: false,
+                highlight: function(code, lang) {
+                    if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                        return hljs.highlight(code, { language: lang }).value;
+                    }
+                    return code;
+                },
             });
         }
 
@@ -46,6 +53,18 @@ const Chat = {
         // New chat button
         document.getElementById('new-chat-btn').addEventListener('click', () => {
             this.newConversation();
+        });
+
+        // Stop streaming button
+        this.stopBtn.addEventListener('click', () => this.stopStreaming());
+
+        // Export button
+        document.getElementById('export-btn').addEventListener('click', () => this.exportChat());
+
+        // Source modal
+        document.getElementById('modal-close').addEventListener('click', () => this.closeSourceModal());
+        document.getElementById('source-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'source-modal') this.closeSourceModal();
         });
 
         // Suggested questions
@@ -88,6 +107,10 @@ const Chat = {
      * Load conversation list in sidebar (with optional search).
      */
     async loadConversations(searchTerm = '') {
+        // Show skeleton while loading
+        this.conversationsList.innerHTML = Array(3).fill(`
+            <div class="skeleton-item"><div class="skeleton-line"></div></div>
+        `).join('');
         try {
             const conversations = await API.getConversations(searchTerm);
             this.renderConversationsList(conversations);
@@ -113,7 +136,7 @@ const Chat = {
             <div class="conversation-item ${conv.id === this.currentConversationId ? 'active' : ''}"
                  data-id="${conv.id}" onclick="Chat.selectConversation('${conv.id}')">
                 <span class="conv-icon">💬</span>
-                <span class="conv-title">${this.escapeHtml(conv.title)}</span>
+                <span class="conv-title" ondblclick="event.stopPropagation(); Chat.startRename('${conv.id}', this)">${this.escapeHtml(conv.title)}</span>
                 <button class="conv-delete" onclick="event.stopPropagation(); Chat.deleteConversation('${conv.id}')" title="Xóa">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"></polyline>
@@ -198,12 +221,20 @@ const Chat = {
                 : '⚖️';
             const sources = msg.sources ? JSON.parse(msg.sources) : [];
 
+            const feedbackHtml = msg.role === 'assistant' && msg.id ? `
+                <div class="feedback-btns" data-msg-id="${msg.id}">
+                    <button class="feedback-btn ${msg.feedback === 'up' ? 'active' : ''}" onclick="Chat.sendFeedback(${msg.id}, 'up', this)" title="Hữu ích">👍</button>
+                    <button class="feedback-btn ${msg.feedback === 'down' ? 'active' : ''}" onclick="Chat.sendFeedback(${msg.id}, 'down', this)" title="Chưa tốt">👎</button>
+                </div>` : '';
+
             return `
                 <div class="message ${msg.role}">
                     <div class="message-avatar">${avatar}</div>
                     <div class="message-body">
+                        ${msg.role === 'assistant' ? '<button class="copy-btn" onclick="Chat.copyMessage(this)" title="Sao ch\u00e9p">📋</button>' : ''}
                         <div class="message-content">${msg.role === 'assistant' ? this.renderMarkdown(msg.content) : this.escapeHtml(msg.content)}</div>
                         ${sources.length ? this.renderSources(sources) : ''}
+                        ${feedbackHtml}
                     </div>
                 </div>
             `;
@@ -242,6 +273,7 @@ const Chat = {
 
         // Render assistant placeholder with typing indicator
         const assistantMsgId = 'msg-' + Date.now();
+        const streamStartTime = performance.now();
         this.messagesContainer.innerHTML += `
             <div class="message assistant" id="${assistantMsgId}">
                 <div class="message-avatar">⚖️</div>
@@ -252,12 +284,17 @@ const Chat = {
                         </div>
                     </div>
                     <div class="message-sources"></div>
+                    <div class="message-timing"></div>
                 </div>
             </div>
         `;
         this.scrollToBottom();
 
         // Start streaming
+        this.isStreaming = true;
+        this.sendBtn.disabled = true;
+        this.sendBtn.classList.add('hidden');
+        this.stopBtn.classList.remove('hidden');
         const { promise, abort } = API.streamChat(message, this.currentConversationId);
         this.currentStreamController = { abort };
 
@@ -280,6 +317,7 @@ const Chat = {
             const msgEl = document.getElementById(assistantMsgId);
             const contentEl = msgEl.querySelector('.message-content');
             const sourcesEl = msgEl.querySelector('.message-sources');
+            const timingEl = msgEl.querySelector('.message-timing');
 
             let buffer = '';
 
@@ -301,6 +339,8 @@ const Chat = {
 
                         if (data.type === 'meta') {
                             this.currentConversationId = data.conversation_id;
+                        } else if (data.type === 'timing') {
+                            timingEl.innerHTML = `<span class="timing-badge">🔍 Tìm kiếm: ${data.retrieval_time}s</span>`;
                         } else if (data.type === 'chunk') {
                             fullText += data.content;
                             contentEl.innerHTML = this.renderMarkdown(fullText);
@@ -310,6 +350,18 @@ const Chat = {
                         } else if (data.type === 'title_update') {
                             // Update conversation title in sidebar
                             this.updateConversationTitle(this.currentConversationId, data.title);
+                        } else if (data.type === 'done') {
+                            const totalTime = data.total_time || ((performance.now() - streamStartTime) / 1000).toFixed(2);
+                            timingEl.innerHTML = `<span class="timing-badge">⚡ Tổng thời gian: ${totalTime}s</span>`;
+                            // Add feedback buttons with message_id
+                            if (data.message_id) {
+                                const fbHtml = `
+                                    <div class="feedback-btns" data-msg-id="${data.message_id}">
+                                        <button class="feedback-btn" onclick="Chat.sendFeedback(${data.message_id}, 'up', this)" title="Hữu ích">👍</button>
+                                        <button class="feedback-btn" onclick="Chat.sendFeedback(${data.message_id}, 'down', this)" title="Chưa tốt">👎</button>
+                                    </div>`;
+                                timingEl.insertAdjacentHTML('afterend', fbHtml);
+                            }
                         } else if (data.type === 'error') {
                             contentEl.innerHTML = `<span style="color: var(--error);">❌ Lỗi: ${this.escapeHtml(data.message)}</span>`;
                             Toast.error(data.message);
@@ -335,6 +387,8 @@ const Chat = {
         } finally {
             this.isStreaming = false;
             this.sendBtn.disabled = !this.messageInput.value.trim();
+            this.sendBtn.classList.remove('hidden');
+            this.stopBtn.classList.add('hidden');
             this.currentStreamController = null;
         }
     },
@@ -358,7 +412,7 @@ const Chat = {
         return `
             <div class="message-sources">
                 ${sources.map(s => `
-                    <span class="source-tag" title="${this.escapeHtml(s.content_preview || '')}">
+                    <span class="source-tag" onclick="Chat.openSourceModal('${this.escapeHtml(s.article || 'N/A')}', '${this.escapeHtml(s.law_name || 'N/A')}', '${this.escapeHtml(s.content_preview || '')}')" title="Click để xem chi tiết">
                         📖 ${this.escapeHtml(s.article || 'N/A')}
                     </span>
                 `).join('')}
@@ -554,5 +608,115 @@ const Chat = {
      */
     scrollToBottom() {
         this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+    },
+
+    /**
+     * Stop the current stream.
+     */
+    stopStreaming() {
+        if (this.currentStreamController) {
+            this.currentStreamController.abort();
+            Toast.show('Đã dừng', 'warning', 2000);
+        }
+    },
+
+    /**
+     * Copy assistant message text.
+     */
+    copyMessage(btn) {
+        const body = btn.closest('.message-body');
+        const text = body.querySelector('.message-content').innerText;
+        navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = '✅';
+            setTimeout(() => { btn.textContent = '📋'; }, 2000);
+        });
+    },
+
+    /**
+     * Send feedback (up/down) for a message.
+     */
+    async sendFeedback(messageId, feedback, btn) {
+        const container = btn.closest('.feedback-btns');
+        const allBtns = container.querySelectorAll('.feedback-btn');
+
+        // Toggle: if already active, remove feedback
+        const isActive = btn.classList.contains('active');
+        const newFeedback = isActive ? null : feedback;
+
+        try {
+            await API.sendFeedback(messageId, newFeedback);
+            allBtns.forEach(b => b.classList.remove('active'));
+            if (!isActive) btn.classList.add('active');
+        } catch (e) {
+            Toast.error('Không thể gửi phản hồi');
+        }
+    },
+
+    /**
+     * Start renaming a conversation inline.
+     */
+    startRename(convId, el) {
+        const oldTitle = el.textContent;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = oldTitle;
+        input.className = 'conv-rename-input';
+        el.replaceWith(input);
+        input.focus();
+        input.select();
+
+        const save = async () => {
+            const newTitle = input.value.trim() || oldTitle;
+            try {
+                await API.renameConversation(convId, newTitle);
+            } catch (e) { /* ignore */ }
+            this.loadConversations();
+        };
+        input.addEventListener('blur', save);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') input.blur();
+            if (e.key === 'Escape') { input.value = oldTitle; input.blur(); }
+        });
+    },
+
+    /**
+     * Open source detail modal.
+     */
+    openSourceModal(article, lawName, preview) {
+        document.getElementById('modal-title').textContent = `📖 ${article}`;
+        document.getElementById('modal-body').innerHTML = `
+            <p class="modal-law-name">${this.escapeHtml(lawName)}</p>
+            <div class="modal-content-text">${this.escapeHtml(preview)}</div>
+        `;
+        document.getElementById('source-modal').classList.remove('hidden');
+    },
+
+    closeSourceModal() {
+        document.getElementById('source-modal').classList.add('hidden');
+    },
+
+    /**
+     * Export current conversation as Markdown.
+     */
+    async exportChat() {
+        if (!this.currentConversationId) return;
+        try {
+            const conv = await API.getConversation(this.currentConversationId);
+            let md = `# ${conv.title}\n\n`;
+            for (const msg of conv.messages) {
+                const role = msg.role === 'user' ? '👤 Người dùng' : '⚖️ Trợ lý';
+                md += `## ${role}\n\n${msg.content}\n\n---\n\n`;
+            }
+            const blob = new Blob([md], { type: 'text/markdown' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${conv.title || 'chat'}.md`;
+            a.click();
+            URL.revokeObjectURL(url);
+            Toast.success('Đã xuất hội thoại');
+        } catch (e) {
+            Toast.error('Không thể xuất hội thoại');
+        }
     },
 };

@@ -18,6 +18,9 @@ const App = {
         // Initialize auth module
         Auth.init();
 
+        // Initialize theme
+        this.initTheme();
+
         // Sidebar toggle for mobile
         const sidebarToggle = document.getElementById('sidebar-toggle');
         const sidebar = document.getElementById('sidebar');
@@ -42,6 +45,53 @@ const App = {
             API.logout();
             this.showAuth();
         });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Ctrl+N: New chat
+            if (e.ctrlKey && e.key === 'n') {
+                e.preventDefault();
+                if (typeof Chat !== 'undefined') Chat.newConversation();
+            }
+            // Escape: close modal or stop streaming
+            if (e.key === 'Escape') {
+                const modal = document.getElementById('source-modal');
+                if (modal && !modal.classList.contains('hidden')) {
+                    Chat.closeSourceModal();
+                } else if (Chat.isStreaming) {
+                    Chat.stopStreaming();
+                }
+                // Close mobile sidebar
+                sidebar.classList.remove('open');
+                overlay.classList.remove('active');
+            }
+        });
+    },
+
+    /**
+     * Initialize theme from localStorage.
+     */
+    initTheme() {
+        const saved = localStorage.getItem('theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', saved);
+        this.updateThemeIcons(saved);
+
+        document.getElementById('theme-toggle').addEventListener('click', () => {
+            const current = document.documentElement.getAttribute('data-theme');
+            const next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            this.updateThemeIcons(next);
+        });
+    },
+
+    updateThemeIcons(theme) {
+        const darkIcon = document.getElementById('theme-icon-dark');
+        const lightIcon = document.getElementById('theme-icon-light');
+        if (darkIcon && lightIcon) {
+            darkIcon.style.display = theme === 'dark' ? 'block' : 'none';
+            lightIcon.style.display = theme === 'light' ? 'block' : 'none';
+        }
     },
 
     /**

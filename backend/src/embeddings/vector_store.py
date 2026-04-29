@@ -150,3 +150,25 @@ def get_collection_info() -> Dict[str, Any]:
         }
     except Exception:
         return {"name": settings.qdrant_collection, "status": "not_found"}
+
+
+def get_data_version() -> Dict[str, Any]:
+    """Get data version info by sampling a point from the collection."""
+    client = _get_client()
+    try:
+        # Scroll one point to get version metadata
+        results = client.scroll(
+            collection_name=settings.qdrant_collection,
+            limit=1,
+            with_payload=True,
+        )
+        points = results[0]
+        if points:
+            payload = points[0].payload
+            return {
+                "version": payload.get("version", "unknown"),
+                "ingested_at": payload.get("ingested_at", "unknown"),
+            }
+        return {"version": "no_data", "ingested_at": "no_data"}
+    except Exception:
+        return {"version": "unavailable", "ingested_at": "unavailable"}

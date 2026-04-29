@@ -90,10 +90,63 @@ def download_law_corpus():
     return ds
 
 
-def filter_labor_law(ds) -> list:
-    """Filter dataset for labor law related documents.
+# ─────────────────────────────────────────────────────────────
+# FILTER: Title-based matching (VERY strict)
+# ─────────────────────────────────────────────────────────────
 
-    Scans the 'markdown' column for labor law keywords.
+# These must appear in the document TITLE (first 500 chars)
+TITLE_KEYWORDS = [
+    "bộ luật lao động",
+    "luật lao động",
+    "luật việc làm",
+    "luật an toàn, vệ sinh lao động",
+    "luật an toàn vệ sinh lao động",
+    "luật bảo hiểm xã hội",
+    "luật bảo hiểm y tế",
+    "luật công đoàn",
+    "hợp đồng lao động",
+    "kỷ luật lao động",
+    "tranh chấp lao động",
+    "quan hệ lao động",
+    "tiền lương",
+    "an toàn lao động",
+    "tai nạn lao động",
+    "bảo hiểm thất nghiệp",
+    "nghỉ thai sản",
+    "thỏa ước lao động",
+    "đình công",
+]
+
+# Exact law/decree codes — match anywhere in document
+EXACT_LAW_CODES = [
+    # Luật
+    "45/2019/qh14",     # Bộ luật Lao động 2019
+    "10/2012/qh13",     # Bộ luật Lao động 2012
+    "58/2014/qh13",     # Luật BHXH
+    "25/2014/qh13",     # Luật BHYT sửa đổi
+    "12/2012/qh13",     # Luật Công đoàn
+    "38/2013/qh13",     # Luật Việc làm
+    "84/2015/qh13",     # Luật ATVSLĐ
+    # Nghị định hướng dẫn BLLĐ 2019
+    "145/2020/nđ-cp",   # Hướng dẫn BLLĐ
+    "135/2020/nđ-cp",   # Tuổi nghỉ hưu
+    "152/2020/nđ-cp",   # Lao động nước ngoài
+    "12/2022/nđ-cp",    # Xử phạt vi phạm lao động
+    "38/2022/nđ-cp",    # Lương tối thiểu
+    "115/2015/nđ-cp",   # Hướng dẫn luật BHXH
+    "143/2018/nđ-cp",   # BHXH bắt buộc cho lao động nước ngoài
+    "148/2018/nđ-cp",   # Sửa đổi NĐ 05/2015 về lao động
+]
+
+
+def filter_labor_law(ds) -> list:
+    """Filter dataset for labor law documents (TITLE-ONLY).
+
+    Only includes documents where:
+    1. The TITLE area (first 500 chars) mentions a labor-specific keyword, OR
+    2. The document references an exact labor law code number.
+
+    NO fallback to body keyword counting — that caused 254K false positives.
 
     Args:
         ds: HuggingFace dataset.
@@ -101,7 +154,7 @@ def filter_labor_law(ds) -> list:
     Returns:
         List of filtered document dicts.
     """
-    print("🔍 Filtering for Labor Law documents...")
+    print("🔍 Filtering for Labor Law documents (title-only mode)...")
     labor_docs = []
 
     for row in tqdm(ds, desc="Filtering"):
@@ -110,7 +163,18 @@ def filter_labor_law(ds) -> list:
             continue
 
         text_lower = text.lower()
-        if any(kw in text_lower for kw in LABOR_KEYWORDS):
+        title_area = text_lower[:500]
+
+        # Rule 1: Title area contains labor-specific keyword
+        if any(kw in title_area for kw in TITLE_KEYWORDS):
+            labor_docs.append({
+                "doc_id": row.get("doc_id", 0),
+                "markdown": text,
+            })
+            continue
+
+        # Rule 2: Document references exact labor law code
+        if any(code in text_lower for code in EXACT_LAW_CODES):
             labor_docs.append({
                 "doc_id": row.get("doc_id", 0),
                 "markdown": text,
@@ -220,43 +284,58 @@ def chunk_by_article(markdown_text: str, law_name: str, doc_id: int) -> list:
 
         chunk_text = context_prefix + part
 
+        # Data versioning metadata
+        version_meta = {
+            "article": article_name,
+            "law_name": law_name,
+            "doc_id": str(doc_id),
+            "chapter": current_chapter,
+            "section": current_section,
+            "source": "kiil-lab/vietnamese-law-corpus",
+            "type": "law_article",
+            "version": time.strftime("%Y-%m-%d"),
+            "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
         # Limit chunk size (if an article is very long)
-        if len(chunk_text) > 2000:
+        if len(chunk_text) > 3000:
             # Split long articles into sub-chunks at Khoản boundaries
             sub_chunks = re.split(r"(?=\n\d+\.\s)", part)
+            overlap = 200
+            total = len([s for s in sub_chunks if len(s.strip()) >= 50])
+            chunk_idx = 0
+            prev_tail = ""
+
             for i, sub in enumerate(sub_chunks):
                 sub = sub.strip()
                 if len(sub) < 50:
                     continue
-                sub_text = context_prefix + sub
+                # Add overlap from previous chunk
+                sub_with_overlap = prev_tail + sub if prev_tail else sub
+                sub_text = context_prefix + sub_with_overlap
                 chunk_id = hashlib.md5(sub_text[:300].encode()).hexdigest()
                 chunks.append({
                     "id": chunk_id,
-                    "text": sub_text[:2000],
+                    "text": sub_text[:3000],
                     "metadata": {
-                        "article": article_name,
-                        "law_name": law_name,
-                        "doc_id": str(doc_id),
-                        "chapter": current_chapter,
-                        "section": current_section,
-                        "source": "kiil-lab/vietnamese-law-corpus",
-                        "type": "law_article",
-                        "sub_part": i,
+                        **version_meta,
+                        "sub_part": chunk_idx,
+                        "chunk_index": chunk_idx,
+                        "total_chunks": total,
                     },
                 })
+                # Save tail for overlap
+                prev_tail = sub[-overlap:] if len(sub) > overlap else sub
+                chunk_idx += 1
         else:
             chunk_id = hashlib.md5(chunk_text[:300].encode()).hexdigest()
             chunks.append({
                 "id": chunk_id,
                 "text": chunk_text,
                 "metadata": {
-                    "article": article_name,
-                    "law_name": law_name,
-                    "doc_id": str(doc_id),
-                    "chapter": current_chapter,
-                    "section": current_section,
-                    "source": "kiil-lab/vietnamese-law-corpus",
-                    "type": "law_article",
+                    **version_meta,
+                    "chunk_index": 0,
+                    "total_chunks": 1,
                 },
             })
 
@@ -398,18 +477,21 @@ def save_chunks(chunks: list, filename: str = "labor_law_chunks.jsonl"):
 def embed_and_store(chunks: list):
     """Embed chunks and store in Qdrant.
 
-    Uses batch processing with rate limiting to stay within API quotas.
+    Uses local fastembed model — no API limits, no rate limiting needed.
 
     Args:
         chunks: List of chunk dicts.
     """
-    print("\n🧬 Embedding chunks and storing in Qdrant...")
+    from src.embeddings.embedding_service import VECTOR_SIZE
 
-    # Create collection
-    create_collection(vector_size=768)  # Gemini text-embedding-004 = 768 dims
+    print(f"\n🧬 Embedding chunks and storing in Qdrant (local model)...")
+    print(f"   Vector size: {VECTOR_SIZE}, Total chunks: {len(chunks)}")
 
-    # Process in batches
-    batch_size = 30  # Smaller batches to respect Gemini API rate limits
+    # Create collection with correct vector size
+    create_collection(vector_size=VECTOR_SIZE)
+
+    # Process in batches — local model, no rate limits
+    batch_size = 256
     total_batches = (len(chunks) + batch_size - 1) // batch_size
     stored = 0
 
@@ -420,13 +502,10 @@ def embed_and_store(chunks: list):
         metadatas = [c["metadata"] for c in batch]
 
         try:
-            # Embed batch
             embeddings = embed_texts(texts)
 
-            # Generate sequential IDs for Qdrant (PointStruct requires int IDs)
             point_ids = list(range(i, i + len(batch)))
 
-            # Store in Qdrant
             upsert_documents(
                 ids=point_ids,
                 embeddings=embeddings,
@@ -437,9 +516,7 @@ def embed_and_store(chunks: list):
 
         except Exception as e:
             print(f"\n⚠️ Error on batch {i // batch_size + 1}: {e}")
-            print("   Retrying after 10 seconds...")
-            time.sleep(10)
-
+            print("   Retrying...")
             try:
                 embeddings = embed_texts(texts)
                 point_ids = list(range(i, i + len(batch)))
@@ -453,64 +530,89 @@ def embed_and_store(chunks: list):
             except Exception as e2:
                 print(f"   ❌ Failed: {e2}. Skipping batch.")
 
-        # Rate limiting: small delay between batches
-        if i + batch_size < len(chunks):
-            time.sleep(1)
-
     print(f"✅ Stored {stored}/{len(chunks)} vectors in Qdrant")
 
 
-# ─────────────────────────────────────────────────────────────
-# Main Pipeline
-# ─────────────────────────────────────────────────────────────
+def load_saved_chunks(filename: str = "labor_law_chunks.jsonl") -> list:
+    """Load previously saved chunks from JSONL file.
+
+    Args:
+        filename: JSONL filename in PROCESSED_DIR.
+
+    Returns:
+        List of chunk dicts, or empty list if file not found.
+    """
+    filepath = PROCESSED_DIR / filename
+    if not filepath.exists():
+        return []
+
+    chunks = []
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                chunks.append(json.loads(line))
+
+    print(f"📂 Loaded {len(chunks)} chunks from {filepath}")
+    return chunks
+
 
 def main():
-    """Run the full ingestion pipeline."""
+    """Run the full ingestion pipeline.
+
+    Supports resume: if chunks were already processed and saved,
+    skips download/filter/chunk and goes straight to embedding.
+    """
     print("=" * 60)
     print("🚀 LEGAL DATA INGESTION PIPELINE")
     print("=" * 60)
 
-    all_chunks = []
+    # ── Check for saved chunks (resume mode) ──
+    all_chunks = load_saved_chunks()
 
-    # ── Source 1: Law Corpus ──
-    print("\n" + "─" * 40)
-    print("📚 Source 1: Vietnamese Law Corpus")
-    print("─" * 40)
-
-    ds_corpus = download_law_corpus()
-    labor_docs = filter_labor_law(ds_corpus)
-
-    if not labor_docs:
-        print("⚠️ No Labor Law documents found in corpus!")
+    if all_chunks:
+        print(f"\n✅ Found saved chunks! Skipping download & processing.")
+        print(f"   (Delete data/processed/labor_law_chunks.jsonl to re-process)")
     else:
-        print(f"\n✂️ Chunking {len(labor_docs)} documents by Điều (Article)...")
-        for doc in tqdm(labor_docs, desc="Chunking"):
-            law_name = extract_law_name(doc["markdown"])
-            doc_chunks = chunk_by_article(doc["markdown"], law_name, doc["doc_id"])
-            all_chunks.extend(doc_chunks)
-        print(f"✅ Created {len(all_chunks)} chunks from law corpus")
+        # ── Source 1: Law Corpus ──
+        print("\n" + "─" * 40)
+        print("📚 Source 1: Vietnamese Law Corpus")
+        print("─" * 40)
 
-    # ── Source 2: Q&A Dataset ──
-    print("\n" + "─" * 40)
-    print("📚 Source 2: Legal Q&A Dataset")
-    print("─" * 40)
+        ds_corpus = download_law_corpus()
+        labor_docs = filter_labor_law(ds_corpus)
 
-    ds_qa = download_qa_dataset()
-    labor_qa = filter_labor_qa(ds_qa)
+        if not labor_docs:
+            print("⚠️ No Labor Law documents found in corpus!")
+        else:
+            print(f"\n✂️ Chunking {len(labor_docs)} documents by Điều (Article)...")
+            for doc in tqdm(labor_docs, desc="Chunking"):
+                law_name = extract_law_name(doc["markdown"])
+                doc_chunks = chunk_by_article(doc["markdown"], law_name, doc["doc_id"])
+                all_chunks.extend(doc_chunks)
+            print(f"✅ Created {len(all_chunks)} chunks from law corpus")
 
-    if labor_qa:
-        qa_chunks = chunk_qa(labor_qa)
-        all_chunks.extend(qa_chunks)
+        # ── Source 2: Q&A Dataset ──
+        print("\n" + "─" * 40)
+        print("📚 Source 2: Legal Q&A Dataset")
+        print("─" * 40)
 
-    # ── Deduplicate ──
-    all_chunks = deduplicate_chunks(all_chunks)
+        ds_qa = download_qa_dataset()
+        labor_qa = filter_labor_qa(ds_qa)
 
-    if not all_chunks:
-        print("❌ No chunks to process!")
-        return
+        if labor_qa:
+            qa_chunks = chunk_qa(labor_qa)
+            all_chunks.extend(qa_chunks)
 
-    # ── Save to JSONL ──
-    save_chunks(all_chunks)
+        # ── Deduplicate ──
+        all_chunks = deduplicate_chunks(all_chunks)
+
+        if not all_chunks:
+            print("❌ No chunks to process!")
+            return
+
+        # ── Save to JSONL ──
+        save_chunks(all_chunks)
 
     # ── Stats ──
     print(f"\n📊 Chunk Statistics:")
@@ -540,3 +642,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

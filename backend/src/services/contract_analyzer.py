@@ -151,20 +151,32 @@ def analyze_contract_stream(contract_text: str) -> Generator[str, None, List[Dic
 
     logger.info("starting_contract_analysis", prompt_length=len(prompt))
 
-    response_stream = client.models.generate_content_stream(
-        model=settings.llm_model,
-        contents=prompt,
-        config=GenerateContentConfig(
-            temperature=0.2,
-            max_output_tokens=4096,
-        ),
-    )
+    max_retries = 3
+    for attempt in range(max_retries):
+        model = settings.llm_model if attempt < max_retries - 1 else settings.llm_fallback_model
+        try:
+            response_stream = client.models.generate_content_stream(
+                model=model,
+                contents=prompt,
+                config=GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=8192,
+                ),
+            )
 
-    for chunk in response_stream:
-        if chunk.text:
-            yield chunk.text
+            for chunk in response_stream:
+                if chunk.text:
+                    yield chunk.text
 
-    return documents
+            return documents
+        except Exception as e:
+            if ('503' in str(e) or '429' in str(e)) and attempt < max_retries - 1:
+                import time
+                wait = 2 ** (attempt + 1)
+                logger.warning("contract_analysis_retry", model=model, attempt=attempt + 1, wait=wait)
+                time.sleep(wait)
+            else:
+                raise
 
 
 def analyze_contract(contract_text: str) -> tuple:

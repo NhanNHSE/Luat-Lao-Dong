@@ -1,6 +1,7 @@
 """Chat endpoints with SSE streaming, caching, rate limiting, and auto-title."""
 
 import json
+import time
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -31,8 +32,8 @@ router = APIRouter(prefix="/api/chat", tags=["Chat"])
 @router.post("/stream")
 @limiter.limit("10/minute")
 def chat_stream(
-    request_obj: Request,
-    request: ChatRequest,
+    request: Request,
+    chat_req: ChatRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -40,14 +41,14 @@ def chat_stream(
 
     Rate limited to 10 requests per minute per IP.
     """
-    logger.info("chat_request", user_id=user.id, message_preview=request.message[:50])
+    logger.info("chat_request", user_id=user.id, message_preview=chat_req.message[:50])
 
     # Get or create conversation
-    if request.conversation_id:
+    if chat_req.conversation_id:
         conversation = (
             db.query(Conversation)
             .filter(
-                Conversation.id == request.conversation_id,
+                Conversation.id == chat_req.conversation_id,
                 Conversation.user_id == user.id,
             )
             .first()
@@ -67,7 +68,7 @@ def chat_stream(
     user_message = Message(
         conversation_id=conversation.id,
         role="user",
-        content=request.message,
+        content=chat_req.message,
     )
     db.add(user_message)
     db.commit()
@@ -83,11 +84,12 @@ def chat_stream(
     # Check cache for non-conversational queries (first message only)
     cached = None
     if len(history) <= 1:
-        cached = get_cached_response(request.message)
+        cached = get_cached_response(chat_req.message)
 
     def event_stream():
         full_response = []
         sources_data = []
+        t_start = time.perf_counter()
 
         try:
             # Send conversation_id first
@@ -115,10 +117,12 @@ def chat_stream(
             else:
                 # Generate fresh response
                 response_gen, documents = ask(
-                    question=request.message,
+                    question=chat_req.message,
                     messages=history,
                     stream=True,
                 )
+                t_retrieval = time.perf_counter() - t_start
+                yield f"data: {json.dumps({'type': 'timing', 'retrieval_time': round(t_retrieval, 2)})}\n\n"
 
                 for chunk in response_gen:
                     full_response.append(chunk)
@@ -135,7 +139,7 @@ def chat_stream(
                 # Cache the response for future identical queries
                 complete_text = "".join(full_response)
                 if len(history) <= 1:
-                    set_cached_response(request.message, complete_text, documents)
+                    set_cached_response(chat_req.message, complete_text, documents)
 
             # Send sources
             yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data})}\n\n"
@@ -150,11 +154,13 @@ def chat_stream(
             )
             db.add(assistant_message)
             db.commit()
+            db.refresh(assistant_message)
+            assistant_msg_id = assistant_message.id
 
             # Auto-generate title for new conversations
             if is_new_conversation:
                 try:
-                    auto_title = generate_title(request.message, complete_response)
+                    auto_title = generate_title(chat_req.message, complete_response)
                     conversation.title = auto_title
                     db.commit()
                     yield f"data: {json.dumps({'type': 'title_update', 'title': auto_title})}\n\n"
@@ -162,12 +168,13 @@ def chat_stream(
                 except Exception as e:
                     logger.warning("auto_title_failed", error=str(e))
                     # Fallback to first 80 chars of question
-                    conversation.title = request.message[:80] + ("..." if len(request.message) > 80 else "")
+                    conversation.title = chat_req.message[:80] + ("..." if len(chat_req.message) > 80 else "")
                     db.commit()
 
-            # Send done signal
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            logger.info("chat_response_complete", conversation_id=conversation.id)
+            # Send done signal with total time and message_id
+            t_total = time.perf_counter() - t_start
+            yield f"data: {json.dumps({'type': 'done', 'total_time': round(t_total, 2), 'message_id': assistant_msg_id})}\n\n"
+            logger.info("chat_response_complete", conversation_id=conversation.id, total_time=round(t_total, 2))
 
         except Exception as e:
             logger.error("chat_stream_error", error=str(e), conversation_id=conversation.id)
@@ -252,3 +259,60 @@ def delete_conversation(
     db.delete(conversation)
     db.commit()
     logger.info("conversation_deleted", conversation_id=conversation_id, user_id=user.id)
+
+
+@router.patch("/conversations/{conversation_id}")
+def update_conversation(
+    conversation_id: str,
+    data: dict,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update a conversation title."""
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user.id,
+        )
+        .first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Cuộc trò chuyện không tồn tại")
+
+    if "title" in data:
+        conversation.title = data["title"][:100]
+        db.commit()
+        logger.info("conversation_renamed", conversation_id=conversation_id, title=data["title"])
+
+    return {"id": conversation.id, "title": conversation.title}
+
+
+@router.patch("/messages/{message_id}/feedback")
+def update_feedback(
+    message_id: int,
+    data: dict,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update feedback (up/down) for a message."""
+    message = (
+        db.query(Message)
+        .join(Conversation)
+        .filter(
+            Message.id == message_id,
+            Conversation.user_id == user.id,
+        )
+        .first()
+    )
+    if not message:
+        raise HTTPException(status_code=404, detail="Tin nhắn không tồn tại")
+
+    feedback = data.get("feedback")
+    if feedback not in ("up", "down", None):
+        raise HTTPException(status_code=400, detail="Feedback phải là 'up', 'down' hoặc null")
+
+    message.feedback = feedback
+    db.commit()
+    logger.info("feedback_updated", message_id=message_id, feedback=feedback)
+    return {"id": message.id, "feedback": message.feedback}

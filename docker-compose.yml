@@ -13,6 +13,8 @@ services:
       - ./backend/src:/app/src
       - ./backend/scripts:/app/scripts
       - ./backend/data:/app/data
+      - hf_cache:/root/.cache/huggingface
+      - fastembed_cache:/root/.cache/fastembed
     depends_on:
       postgres:
         condition: service_healthy
@@ -20,6 +22,13 @@ services:
         condition: service_healthy
     networks:
       - lawbot-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   # --- Frontend (Nginx) ---
@@ -44,7 +53,7 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - ./docker-volumes/qdrant:/qdrant/storage
+      - qdrant_data:/qdrant/storage
     healthcheck:
       test: ["CMD-SHELL", "bash -c ':> /dev/tcp/localhost/6333' || exit 1"]
       interval: 10s
@@ -63,7 +72,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./docker-volumes/postgres:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lawbot} -d ${POSTGRES_DB:-lawbot_db}"]
       interval: 10s
@@ -72,6 +81,13 @@ services:
     networks:
       - lawbot-network
     restart: unless-stopped
+
+# Named volumes (stored in Docker's Linux filesystem, not on NTFS)
+volumes:
+  postgres_data:
+  qdrant_data:
+  hf_cache:
+  fastembed_cache:
 
 networks:
   lawbot-network:

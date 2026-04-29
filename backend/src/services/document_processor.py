@@ -2,6 +2,8 @@
 
 import io
 import base64
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -137,6 +139,55 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     return "\n".join(paragraphs)
 
 
+def extract_text_from_doc(file_bytes: bytes) -> str:
+    """Extract text from old .doc (binary) format using antiword.
+
+    Falls back to reading raw text if antiword is not available.
+
+    Args:
+        file_bytes: Raw DOC file bytes.
+
+    Returns:
+        Extracted text content.
+    """
+    # Try antiword first
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        result = subprocess.run(
+            ['antiword', tmp_path],
+            capture_output=True, text=True, timeout=30
+        )
+        import os
+        os.unlink(tmp_path)
+
+        if result.returncode == 0 and result.stdout.strip():
+            logger.info("doc_extracted_antiword", chars=len(result.stdout))
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning("antiword_unavailable", error=str(e))
+
+    # Fallback: try python-docx anyway (works for some .doc files saved as .docx)
+    try:
+        return extract_text_from_docx(file_bytes)
+    except Exception:
+        pass
+
+    # Last resort: extract readable text from binary
+    try:
+        text = file_bytes.decode('utf-8', errors='ignore')
+        # Filter printable lines
+        lines = [l.strip() for l in text.split('\n') if len(l.strip()) > 10]
+        if lines:
+            return "\n".join(lines)
+    except Exception:
+        pass
+
+    raise ValueError("Không thể đọc file .doc. Vui lòng chuyển sang .docx hoặc .pdf.")
+
+
 def extract_text_from_image(file_bytes: bytes, mime_type: str) -> str:
     """Extract text from image using Gemini Vision OCR.
 
@@ -199,8 +250,10 @@ def extract_text(filename: str, file_bytes: bytes) -> str:
 
     if ext == ".pdf":
         return extract_text_from_pdf(file_bytes)
-    elif ext in (".docx", ".doc"):
+    elif ext == ".docx":
         return extract_text_from_docx(file_bytes)
+    elif ext == ".doc":
+        return extract_text_from_doc(file_bytes)
     elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif"):
         mime_type = SUPPORTED_EXTENSIONS.get(ext, "image/png")
         return extract_text_from_image(file_bytes, mime_type)

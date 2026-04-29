@@ -77,8 +77,8 @@ async def log_requests(request: Request, call_next):
 
 @app.get("/api/health")
 def health_check():
-    """Health check endpoint with cache stats."""
-    from src.embeddings.vector_store import get_collection_info
+    """Health check endpoint with cache stats and data version."""
+    from src.embeddings.vector_store import get_collection_info, get_data_version
     from src.core.cache import get_cache_stats
 
     return {
@@ -86,4 +86,5 @@ def health_check():
         "app": settings.app_name,
         "vector_store": get_collection_info(),
         "cache": get_cache_stats(),
+        "data_version": get_data_version(),
     }

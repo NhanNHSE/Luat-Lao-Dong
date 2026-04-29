@@ -28,10 +28,12 @@ class Settings(BaseSettings):
     jwt_expiration_minutes: int = 1440  # 24 hours
 
     # RAG
-    embedding_model: str = "text-embedding-004"
-    llm_model: str = "gemini-2.5-flash-preview-05-20"
-    retrieval_top_k: int = 8
-    chunk_size: int = 1000
+    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    llm_model: str = "gemini-2.5-flash"
+    llm_fallback_model: str = "gemini-2.5-flash-lite"
+    retrieval_top_k: int = 15        # Over-fetch from Qdrant
+    rerank_top_k: int = 5            # Keep after rerank
+    chunk_size: int = 3000
     chunk_overlap: int = 200
 
     model_config = {"env_file": ".env", "extra": "ignore"}

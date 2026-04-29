@@ -52,6 +52,7 @@ class Message(Base):
     role = Column(String(20), nullable=False)  # "user" or "assistant"
     content = Column(Text, nullable=False)
     sources = Column(Text, nullable=True)  # JSON string of cited law articles
+    feedback = Column(String(10), nullable=True)  # "up", "down", or null
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     conversation = relationship("Conversation", back_populates="messages")

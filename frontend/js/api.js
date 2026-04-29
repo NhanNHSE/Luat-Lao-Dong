@@ -125,6 +125,30 @@ const API = {
     },
 
     /**
+     * Rename a conversation.
+     */
+    async renameConversation(id, title) {
+        const res = await this.request(`/chat/conversations/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ title }),
+        });
+        if (!res.ok) throw new Error('Không thể đổi tên hội thoại');
+        return res.json();
+    },
+
+    /**
+     * Send feedback for a message.
+     */
+    async sendFeedback(messageId, feedback) {
+        const res = await this.request(`/chat/messages/${messageId}/feedback`, {
+            method: 'PATCH',
+            body: JSON.stringify({ feedback }),
+        });
+        if (!res.ok) throw new Error('Không thể gửi phản hồi');
+        return res.json();
+    },
+
+    /**
      * Send a chat message with SSE streaming.
      * Returns an object to control the stream.
      */

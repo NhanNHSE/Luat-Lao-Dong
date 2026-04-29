@@ -86,6 +86,9 @@ async def analyze_contract_endpoint(
     db.add(user_message)
     db.commit()
 
+    # Save IDs before entering generator (session will be closed by then)
+    conversation_id = conversation.id
+
     # Streaming analysis
     def event_stream():
         full_response = []
@@ -93,7 +96,7 @@ async def analyze_contract_endpoint(
 
         try:
             # Send meta
-            yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation.id, 'extracted_length': len(extracted_text)})}\n\n"
+            yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation_id, 'extracted_length': len(extracted_text)})}\n\n"
 
             # Send extracted text preview
             yield f"data: {json.dumps({'type': 'extracted_text', 'preview': extracted_text[:500], 'total_chars': len(extracted_text)})}\n\n"
@@ -122,19 +125,24 @@ async def analyze_contract_endpoint(
 
             yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data})}\n\n"
 
-            # Save analysis to DB
-            complete_response = "".join(full_response)
-            assistant_message = Message(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=complete_response,
-                sources=json.dumps(sources_data, ensure_ascii=False) if sources_data else None,
-            )
-            db.add(assistant_message)
-            db.commit()
+            # Save analysis to DB with a fresh session
+            from src.core.database import SessionLocal
+            fresh_db = SessionLocal()
+            try:
+                complete_response = "".join(full_response)
+                assistant_message = Message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=complete_response,
+                    sources=json.dumps(sources_data, ensure_ascii=False) if sources_data else None,
+                )
+                fresh_db.add(assistant_message)
+                fresh_db.commit()
+            finally:
+                fresh_db.close()
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            logger.info("contract_analysis_complete", conversation_id=conversation.id)
+            logger.info("contract_analysis_complete", conversation_id=conversation_id)
 
         except Exception as e:
             logger.error("contract_analysis_error", error=str(e))
